@@ -117,7 +117,7 @@ services:
     # curl is explicitly installed in the Dockerfile via apt-get
     # and is not available by default in python:3.9-slim
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:5000/ready"]
       interval: 30s      # Check every 30 seconds
       timeout: 10s       # Fail if no response within 10 seconds
       retries: 3         # Mark unhealthy after 3 consecutive failures

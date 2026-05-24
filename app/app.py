@@ -2,6 +2,7 @@ import os
 import logging
 from flask import Flask, render_template, request, redirect, url_for, jsonify
 from flask_mysqldb import MySQL
+from health import health_bp
 
 # ============================================================
 # LOGGING SETUP — add this once at the top, before anything else
@@ -23,6 +24,8 @@ app.config['MYSQL_DB'] = os.environ.get('DB_NAME', 'default_db')
 
 # Initialize MySQL
 mysql = MySQL(app)
+
+app.register_blueprint(health_bp)
 
 def init_db():
     with app.app_context():
@@ -57,27 +60,6 @@ def submit():
     cur.close()
     logger.info("Message saved to DB successfully.")  # 👈 LOG
     return jsonify({'message': new_message})
-
-@app.route('/health')
-def health():
-    logger.info("Health check endpoint hit")  # 👈 LOG
-    try:
-        cur = mysql.connection.cursor()
-        cur.execute('SELECT COUNT(*) FROM messages')
-        count = cur.fetchone()[0]
-        cur.close()
-        logger.info(f"Health check passed — message count: {count}")  # 👈 LOG
-        return jsonify({
-            'status': 'healthy',
-            'database': 'connected',
-            'message_count': count
-        }), 200
-    except Exception as e:
-        logger.error(f"Health check FAILED — DB error: {str(e)}")  # 👈 LOG
-        return jsonify({
-            'status': 'unhealthy',
-            'database': str(e)
-        }), 500
 
 if __name__ == '__main__':
     # NOTE:
