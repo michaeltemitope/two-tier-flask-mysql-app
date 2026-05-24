@@ -1,0 +1,293 @@
+# =============================================================
+# .github/workflows/deploy.yml
+#
+# Purpose     : CI/CD pipeline for Flask + MySQL Docker app
+# Trigger     : Push to main branch or manual workflow_dispatch
+# CI          : Validates code on GitHub-hosted runner
+# CD          : Deploys to AWS EC2 via SSH
+# Environment : Secrets are stored under the GitHub environment
+#               named "production" — declared on the cd job below
+#
+# GitHub Secrets required (created inside "production" env):
+#   EC2_HOST        - EC2 public IP or DNS
+#   EC2_PORT        - SSH port (always set this to 22)
+#   EC2_USER        - SSH username (deployer)
+#   EC2_PRIVATE_KEY - Full contents of your .pem private key
+#
+# NOTE: The .env file is managed directly on EC2 and must exist
+# at the deploy path before the pipeline runs for the first time.
+# GitHub Actions no longer creates or transfers it.
+# =============================================================
+
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+
+  # ===========================================================
+  # JOB 1 — CI
+  # No environment needed here — CI uses no secrets
+  # ===========================================================
+  ci:
+    name: CI — Validate
+    runs-on: ubuntu-latest
+
+    steps:
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # -------------------------------------------------------
+      # Validate docker-compose.yml syntax
+      # A dummy .env is created with placeholder values so
+      # docker compose config can resolve variable substitution
+      # without needing real credentials on the runner
+      # -------------------------------------------------------
+      - name: Validate docker-compose configuration
+        run: |
+          cat <<EOF > .env
+          DB_HOST=db
+          DB_PORT=3306
+          DB_USER=dummy_user
+          DB_PASSWORD=dummy_password
+          DB_NAME=dummy_db
+          DB_MAX_RETRIES=30
+          DB_RETRY_INTERVAL=2
+          DB_MAX_SLEEP=30
+          MYSQL_ROOT_PASSWORD=dummy_root_password
+          MYSQL_USER=dummy_user
+          MYSQL_PASSWORD=dummy_password
+          MYSQL_DATABASE=dummy_db
+          EOF
+          docker compose config --quiet
+          echo "docker-compose.yml syntax is valid"
+
+      - name: Validate Dockerfile build
+        run: |
+          docker build -t flask-app-ci-check .
+          echo "Dockerfile build successful"
+
+      - name: Validate wait-for-db.sh syntax
+        run: |
+          bash -n wait-for-db.sh
+          echo "wait-for-db.sh syntax is valid"
+
+      # -------------------------------------------------------
+      # Integration test — spins up full stack on the runner
+      # Polls /health until Flask responds or timeout is reached
+      # On failure prints compose ps and logs for debugging
+      # -------------------------------------------------------
+      - name: Run integration test
+        run: |
+          echo "Starting full stack for integration test..."
+          docker compose up -d --build
+
+          echo "Polling /health until Flask is ready..."
+          TIMEOUT=120
+          ELAPSED=0
+          until curl -sf http://localhost:5000/health; do
+            if [ "${ELAPSED}" -ge "${TIMEOUT}" ]; then
+              echo "ERROR: Flask did not become healthy within ${TIMEOUT}s"
+              echo ""
+              echo "--- docker compose ps ---"
+              docker compose ps
+              echo ""
+              echo "--- docker compose logs ---"
+              docker compose logs
+              exit 1
+            fi
+            echo "Not ready yet — waiting 5s (${ELAPSED}s elapsed)"
+            sleep 5
+            ELAPSED=$(( ELAPSED + 5 ))
+          done
+          echo "Integration test passed — /health responded successfully"
+
+      - name: Tear down integration test stack
+        if: always()
+        run: |
+          docker compose down -v
+          echo "Integration test stack torn down"
+
+  # ===========================================================
+  # JOB 2 — CD
+  #
+  # environment: production tells GitHub to look for secrets
+  # inside the production environment. Without this line,
+  # secrets created under an environment are invisible to the
+  # workflow and all secret references resolve to empty strings
+  # causing silent authentication failures.
+  # ===========================================================
+  cd:
+    name: CD — Deploy to EC2
+    runs-on: ubuntu-latest
+    needs: ci
+    environment: production
+
+    env:
+      EC2_HOST: ${{ secrets.EC2_HOST }}
+      EC2_PORT: ${{ secrets.EC2_PORT }}
+      EC2_USER: ${{ secrets.EC2_USER }}
+      DEPLOY_PATH: /home/deployer/Flask-MySQL-DevOps-Project
+
+    steps:
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # -------------------------------------------------------
+      # Write SSH private key and build known_hosts
+      #
+      # ssh-keyscan fetches EC2's real host fingerprint and
+      # saves it to known_hosts so SSH can verify the server
+      # identity on every connection without interactive prompts
+      #
+      # A retry loop is used because EC2 may be briefly
+      # unreachable when the runner first tries to scan it.
+      # If known_hosts is still empty after 3 attempts the
+      # step fails immediately with a clear diagnostic message
+      # rather than a confusing SSH error in a later step.
+      # -------------------------------------------------------
+      - name: Configure SSH key and verify EC2 host fingerprint
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+
+          # Write private key from secret to file
+          printf '%s\n' "${{ secrets.EC2_PRIVATE_KEY }}" \
+            > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+
+          # Fetch EC2 host fingerprint with retries
+          # -p specifies the SSH port
+          # -H hashes the hostname for security
+          echo "Fetching EC2 host fingerprint..."
+          for i in 1 2 3; do
+            ssh-keyscan -p "${EC2_PORT}" -H "${EC2_HOST}" \
+              >> ~/.ssh/known_hosts 2>/dev/null
+            if [ -s ~/.ssh/known_hosts ]; then
+              echo "Host fingerprint retrieved successfully"
+              break
+            fi
+            echo "Attempt ${i}/3 failed — retrying in 5s..."
+            sleep 5
+          done
+
+          # Fail clearly if known_hosts is still empty
+          # This means EC2 was unreachable during all attempts
+          # Common causes:
+          #   - EC2 instance is stopped
+          #   - Security group blocks inbound SSH from GitHub
+          #   - EC2_HOST secret contains the wrong IP address
+          if [ ! -s ~/.ssh/known_hosts ]; then
+            echo "ERROR: Could not retrieve EC2 host fingerprint."
+            echo "Possible causes:"
+            echo "  - EC2 instance is stopped or not reachable"
+            echo "  - Security group does not allow inbound SSH"
+            echo "  - EC2_HOST secret contains the wrong IP address"
+            exit 1
+          fi
+
+          chmod 644 ~/.ssh/known_hosts
+          echo "SSH key and host verification configured successfully"
+
+      - name: Test SSH connection to EC2
+        run: |
+          ssh -i ~/.ssh/deploy_key \
+              -p "${EC2_PORT}" \
+              "${EC2_USER}@${EC2_HOST}" \
+              "echo 'SSH connection successful'"
+
+      # REMOVED — .env is now managed directly on EC2
+      # NOTE — .env must exist on EC2 before deployment at:
+      # /home/deployer/Flask-MySQL-DevOps-Project/.env
+      # GitHub Actions will never create, update or delete it
+
+      - name: Deploy application on EC2
+        run: |
+          ssh -i ~/.ssh/deploy_key \
+              -p "${EC2_PORT}" \
+              "${EC2_USER}@${EC2_HOST}" \
+              "APP_DIR='${DEPLOY_PATH}' bash -s" << 'ENDSSH'
+
+            set -e
+
+            echo "============================================"
+            echo "Deployment started: $(date)"
+            echo "============================================"
+
+            echo "[1/5] Navigating to application directory..."
+            cd "${APP_DIR}"
+
+            # NOTE — .env must already exist at this location
+            # on EC2 before deployment. It is not managed by
+            # this pipeline. If missing docker compose will fail
+            # with missing variable errors on startup.
+            echo "[2/5] Syncing latest code from remote..."
+            git fetch origin main
+            git reset --hard origin/main
+
+            echo "[3/5] Stopping existing containers..."
+            docker compose down --timeout 30
+
+            echo "[4/5] Rebuilding image and starting containers..."
+            docker compose up -d --build
+
+            # Small buffer before health check begins
+            # Containers need a moment to fully initialise after
+            # starting. This reduces noisy failed attempts at the
+            # beginning of the health check loop and avoids
+            # hammering the app the instant Docker starts it.
+            sleep 5
+
+            echo "[5/5] Cleaning up unused Docker images..."
+            docker image prune -f || true
+
+            echo "============================================"
+            echo "Deployment complete: $(date)"
+            echo "============================================"
+
+            echo "Verifying deployment health via localhost..."
+            TIMEOUT=60
+            ELAPSED=0
+            until curl -sf http://localhost:5000/health; do
+              if [ "${ELAPSED}" -ge "${TIMEOUT}" ]; then
+                echo "============================================"
+                echo "ERROR: App did not become healthy after ${TIMEOUT}s"
+                echo "============================================"
+                echo ""
+                echo "--- docker compose ps ---"
+                docker compose ps
+                echo ""
+                echo "--- docker compose logs (last 100 lines) ---"
+                docker compose logs --tail=100
+                echo "============================================"
+                exit 1
+              fi
+              echo "Not ready yet — waiting 5s (${ELAPSED}s elapsed)"
+              sleep 5
+              ELAPSED=$(( ELAPSED + 5 ))
+            done
+
+            echo "============================================"
+            echo "Health check passed — app is live on EC2"
+            echo "============================================"
+
+          ENDSSH
+
+      - name: Clean up sensitive files from runner
+        if: always()
+        run: |
+          rm -f ~/.ssh/deploy_key
+          echo "Sensitive files removed from runner"
