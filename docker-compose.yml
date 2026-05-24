@@ -1,60 +1,147 @@
-version: "3.8"
+# =============================================================
+# docker-compose.yml
+# Purpose  : Orchestrates Flask and MySQL containers together
+# Usage    : docker-compose up --build
+# Requires : .env file in the same directory
+# Note     : version field intentionally omitted — deprecated
+#            in Docker Compose v2 and later
+# =============================================================
 
 services:
-  mysql:
-    container_name: mysql
-    image: mysql
+
+  # -------------------------------------------------------------
+  # MySQL Database Service
+  # Starts first and must be healthy before Flask starts
+  # Receives: MYSQL_ROOT_PASSWORD, MYSQL_USER, MYSQL_PASSWORD,
+  #           MYSQL_DATABASE
+  # On first startup MySQL automatically:
+  #   - creates root user with MYSQL_ROOT_PASSWORD
+  #   - creates MYSQL_USER with MYSQL_PASSWORD
+  #   - creates MYSQL_DATABASE
+  #   - grants MYSQL_USER full access to MYSQL_DATABASE only
+  # -------------------------------------------------------------
+  db:
+    # Pinned to exact MySQL version to prevent unexpected updates
+    # Update this version intentionally and test before changing
+    image: mysql:8.0.36
+
+    # Container name intentionally omitted
+    # Docker generates a unique name automatically
+    # This allows multiple instances and avoids naming conflicts
+
+    # Inject only the variables MySQL needs for initialization
     environment:
-      MYSQL_ROOT_PASSWORD: "root"
-      MYSQL_DATABASE: "devops"
-    ports:
-      - "3306:3306"
+      MYSQL_ROOT_PASSWORD: "${MYSQL_ROOT_PASSWORD}"
+      MYSQL_USER: "${MYSQL_USER}"
+      MYSQL_PASSWORD: "${MYSQL_PASSWORD}"
+      MYSQL_DATABASE: "${MYSQL_DATABASE}"
 
     volumes:
       - mysql_data:/var/lib/mysql
+      # Run message.sql automatically on first container startup
+      # MySQL only runs files in this directory on fresh initialization
+      - ./db-init/message.sql:/docker-entrypoint-initdb.d/message.sql:ro
 
+    restart: unless-stopped
+
+    # Only accessible internally by other containers
+    # Not exposed to the outside world for security
     networks:
-      - two-tier-nt
+      - app_network
 
-    restart: always
+    # UPDATED — Improved healthcheck for CI reliability
+    # CMD-SHELL runs the command through the container shell
+    # which correctly expands environment variables at runtime
+    #
+    # Previously used CMD form which does not invoke a shell
+    # meaning ${MYSQL_ROOT_PASSWORD} was not always expanded
+    # reliably in CI environments causing false unhealthy results
+    #
+    # $$ is used instead of $ to escape the variable correctly
+    # inside docker-compose YAML — a single $ would be treated
+    # as a docker-compose variable substitution and fail
+    # $$ tells docker-compose to pass a literal $ to the shell
+    # so the container shell expands it as $MYSQL_ROOT_PASSWORD
+    #
+    # || exit 1 makes the failure explicit — if mysqladmin ping
+    # fails for any reason the shell exits with code 1 which
+    # Docker recognises as an unhealthy result immediately
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot","-proot"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 60s
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -u root -p$$MYSQL_ROOT_PASSWORD --silent || exit 1"]
+      interval: 10s      # Check every 10 seconds
+      timeout: 5s        # Fail the check if no response within 5 seconds
+      retries: 5         # Mark as unhealthy after 5 consecutive failures
+      start_period: 30s  # Give MySQL 30 seconds to initialize before checking
 
-
-  flask-app:
-    container_name: two-tier-app
+  # -------------------------------------------------------------
+  # Flask Application Service
+  # Waits for MySQL to be healthy before starting
+  # Receives: DB_HOST, DB_PORT, DB_USER, DB_PASSWORD, DB_NAME
+  #           DB_MAX_RETRIES, DB_RETRY_INTERVAL, DB_MAX_SLEEP
+  # -------------------------------------------------------------
+  flask:
     build:
       context: .
+      dockerfile: Dockerfile
+
+    # Run as non-root appuser created in the Dockerfile
+    # This reinforces the USER directive in the Dockerfile at
+    # the orchestration level for defence in depth
+    user: "appuser"
+
+    # Container name intentionally omitted
+    # Docker generates a unique name automatically
+    # This allows multiple instances and avoids naming conflicts
+
+    # Inject only the variables Flask and wait-for-db.sh need
+    # MySQL initialization variables are not needed here
+    environment:
+      DB_HOST: "${DB_HOST}"
+      DB_PORT: "${DB_PORT}"
+      DB_USER: "${DB_USER}"
+      DB_PASSWORD: "${DB_PASSWORD}"
+      DB_NAME: "${DB_NAME}"
+      DB_MAX_RETRIES: "${DB_MAX_RETRIES}"
+      DB_RETRY_INTERVAL: "${DB_RETRY_INTERVAL}"
+      DB_MAX_SLEEP: "${DB_MAX_SLEEP}"
 
     ports:
       - "5000:5000"
 
-    environment:
-      - MYSQL_HOST=mysql
-      - MYSQL_USER=root
-      - MYSQL_PASSWORD=root
-      - MYSQL_DB=devops
-
-    networks:
-      - two-tier-nt
-
     depends_on:
-      mysql:
+      db:
         condition: service_healthy
 
+    # Health check — hits the /health endpoint every 30 seconds
+    # Confirms Flask is running AND database connection is alive
+    # curl is explicitly installed in the Dockerfile via apt-get
+    # and is not available by default in python:3.9-slim
     healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:5000/health || exit 1"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 60s
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 30s      # Check every 30 seconds
+      timeout: 10s       # Fail if no response within 10 seconds
+      retries: 3         # Mark unhealthy after 3 consecutive failures
+      start_period: 15s  # Give Flask 15 seconds to boot before first check
 
+    restart: unless-stopped
+
+    networks:
+      - app_network
+
+# -------------------------------------------------------------
+# Named Volume
+# Stores MySQL data permanently outside the container
+# Data survives even if the container is deleted
+# -------------------------------------------------------------
 volumes:
   mysql_data:
+    driver: local
 
+# -------------------------------------------------------------
+# Internal Network
+# Both containers communicate privately on this network
+# MySQL is not exposed to the outside world
+# -------------------------------------------------------------
 networks:
-  two-tier-nt:
+  app_network:
+    driver: bridge

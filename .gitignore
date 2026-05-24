@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual Environment
+venv/
+.env/
+
+# Environment variables (VERY IMPORTANT)
+.env.prod
+.env.dev
+
+# Logs
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Database files (if any local DB files exist)
+*.db
+*.sqlite3
+
+# Pytest / coverage
+.coverage
+htmlcov/
+
+# Docker
+*.tar
+
+# Misc
+*.swp
