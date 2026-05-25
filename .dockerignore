@@ -22,11 +22,14 @@ venv/
 .DS_Store
 Thumbs.db
 
+# Dev dependencies tools not needed in runtime
+app/requirements-dev.txt
+
 # IDE
 .vscode/
 .idea/
 
-#other unneeded files an folder
+# other unneeded files an folder
 db/
 diagrams/
 screenshots/

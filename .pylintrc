@@ -1,0 +1,27 @@
+# =============================================================
+# .pylintrc
+# Purpose  : Configures pylint — deep static code analyser
+# Run with : pylint app/app.py app/health.py
+# Used in  : GitHub Actions CI pipeline (lint stage)
+# =============================================================
+
+[MASTER]
+ignore = .venv, venv, __pycache__
+
+[MESSAGES CONTROL]
+disable =
+    C0114,
+    C0115,
+    C0116,
+    R0903,
+    W0611,
+    E0401
+
+[FORMAT]
+max-line-length = 88
+
+[BASIC]
+good-names = cur, e, i, j, k
+
+[SIMILARITIES]
+min-similarity-lines = 10

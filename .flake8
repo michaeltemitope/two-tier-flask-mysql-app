@@ -1,0 +1,21 @@
+# =============================================================
+# .flake8
+# Purpose  : Configures flake8 — Python style and syntax linter
+# Run with : flake8 app/
+# Used in  : GitHub Actions CI pipeline (lint stage)
+# =============================================================
+
+[flake8]
+
+max-line-length = 88
+
+exclude =
+    .git,
+    __pycache__,
+    .venv,
+    venv
+
+ignore = W503, E501
+
+per-file-ignores =
+    tests/test_app.py: E402

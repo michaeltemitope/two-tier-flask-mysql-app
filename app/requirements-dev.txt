@@ -1,0 +1,63 @@
+# =============================================================
+# requirements-dev.txt
+# Purpose  : Developer and CI dependencies only
+#            NOT installed in the production Docker image
+# Install  : pip install -r requirements-dev.txt
+# Used in  : GitHub Actions CI pipeline (all stages)
+#
+# These packages are only needed for linting, static analysis,
+# security scanning, and running tests. They must never be
+# added to requirements.txt (production dependencies) because
+# they increase image size and attack surface unnecessarily.
+# =============================================================
+
+# -------------------------------------------------------------
+# Testing
+# pytest       — the test runner that discovers and runs all
+#                files matching test_*.py in the tests/ folder
+# pytest-flask — Flask-specific pytest helpers. Provides the
+#                live_server fixture and makes working with
+#                Flask test clients cleaner in pytest
+# -------------------------------------------------------------
+pytest==8.3.5
+pytest-flask==1.3.0
+
+# -------------------------------------------------------------
+# Linting — style and syntax checking
+# flake8       — fast PEP8 style checker. Catches syntax errors,
+#                unused imports, and formatting issues.
+#                Configured via .flake8 in the project root.
+# -------------------------------------------------------------
+flake8==7.2.0
+
+# -------------------------------------------------------------
+# Static analysis — deeper code quality checks
+# pylint       — analyses code structure, catches potential bugs,
+#                enforces naming conventions, and flags code
+#                smells that flake8 misses.
+#                Configured via .pylintrc in the project root.
+# -------------------------------------------------------------
+pylint==3.3.7
+
+# -------------------------------------------------------------
+# Security scanning
+# bandit       — scans Python source code for common security
+#                vulnerabilities such as hardcoded passwords,
+#                use of dangerous functions, SQL injection risks,
+#                and insecure use of subprocess.
+#                Run with: bandit -r app/ -ll
+#                -r  : recursive scan of the app/ directory
+#                -ll : only report MEDIUM and HIGH severity issues
+#                      LOW severity issues are suppressed to avoid
+#                      noise on a portfolio-level project
+# -------------------------------------------------------------
+bandit==1.8.3
+
+# -------------------------------------------------------------
+# Production dependencies also needed in CI for tests to run
+# These are duplicated from requirements.txt because CI installs
+# only requirements-dev.txt during the test stage. pytest needs
+# to be able to import Flask and flask_mysqldb to run test_app.py
+# -------------------------------------------------------------
+flask==3.1.0
+flask-mysqldb==2.0.0
